@@ -1,2 +1,5 @@
 .env
 .DS_Store
+job_env/
+job_scraper.log
+__pycache__/
