@@ -1,5 +1,4 @@
 import streamlit as st
-import pandas as pd
 from langchain_community.chat_models import ChatOllama
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -11,6 +10,144 @@ from bs4 import BeautifulSoup
 import requests
 import tempfile
 import os
+import plotly.graph_objects as go
+import re
+
+def create_radar_chart(skills_data):
+    """Create a radar chart for skills matching."""
+    categories = [skill['name'] for skill in skills_data]
+    scores = [skill['score'] for skill in skills_data]
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatterpolar(
+        r=scores,
+        theta=categories,
+        fill='toself',
+        name='Skills Match'
+    ))
+    
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100]
+            )
+        ),
+        showlegend=True,
+        title="Skills Match Analysis"
+    )
+    
+    return fig
+
+def create_category_bar_chart(overall_score, skills_score, experience_score):
+    """Create a bar chart for different score categories."""
+    categories = ['Overall Match', 'Skills Match', 'Experience Match']
+    scores = [overall_score, skills_score, experience_score]
+    
+    fig = go.Figure(data=[
+        go.Bar(
+            x=categories,
+            y=scores,
+            marker_color=['#3366cc', '#dc3912', '#ff9900']
+        )
+    ])
+    
+    fig.update_layout(
+        title="Match Score Breakdown",
+        yaxis_title="Score (%)",
+        yaxis=dict(range=[0, 100]),
+        showlegend=False
+    )
+    
+    return fig
+
+def create_gauge_chart(score):
+    """Create a gauge chart for overall match score."""
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=score,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': "Overall Match Score"},
+        gauge={
+            'axis': {'range': [0, 100]},
+            'bar': {'color': "#2ecc71" if score >= 75 else "#f1c40f" if score >= 50 else "#e74c3c"},
+            'steps': [
+                {'range': [0, 50], 'color': "rgba(231, 76, 60, 0.2)"},
+                {'range': [50, 75], 'color': "rgba(241, 196, 15, 0.2)"},
+                {'range': [75, 100], 'color': "rgba(46, 204, 113, 0.2)"}
+            ]
+        }
+    ))
+    
+    fig.update_layout(height=300)
+    return fig
+
+def extract_percentage(text):
+    """Extract percentage from text."""
+    match = re.search(r'(\d+)%', text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r'(\d+)', text)
+    if match:
+        return int(match.group(1))
+    return 0
+
+def parse_analysis_scores(analysis_text):
+    """Parse the analysis text to extract scores."""
+    lines = analysis_text.split('\n')
+    overall_score = 0
+    skills_score = 0
+    experience_score = 0
+    skills_data = []
+    
+    section = ""
+    for line in lines:
+        if '# ' in line or '## ' in line:
+            section = line.lower()
+            continue
+            
+        if 'overall match score' in section.lower() and '%' in line:
+            overall_score = extract_percentage(line)
+            
+        if 'matching skills' in section.lower() and '-' in line:
+            skill_match = extract_percentage(line)
+            skill_name = line.split('-')[1].split(':')[0].strip() if ':' in line else line.split('-')[1].strip()
+            if skill_match > 0:
+                skills_data.append({"name": skill_name, "score": skill_match})
+                
+        if 'experience' in line.lower() and '%' in line:
+            experience_score = extract_percentage(line)
+    
+    if not skills_data:
+        # Create default skills data if none found
+        skills_data = [
+            {"name": "Technical Skills", "score": overall_score},
+            {"name": "Experience", "score": experience_score if experience_score > 0 else overall_score - 10},
+            {"name": "Education", "score": overall_score - 5},
+            {"name": "Communication", "score": overall_score + 5 if overall_score <= 95 else 100}
+        ]
+    
+    return overall_score, skills_data, experience_score if experience_score > 0 else overall_score - 15
+
+def display_visualizations(analysis_text):
+    """Display all visualizations for the analysis."""
+    overall_score, skills_data, experience_score = parse_analysis_scores(analysis_text)
+    skills_avg = sum(skill['score'] for skill in skills_data) / len(skills_data)
+    
+    # Create three columns for the visualizations
+    col1, col2 = st.columns(2)
+    
+    # Display gauge chart in its own row
+    st.plotly_chart(create_gauge_chart(overall_score), use_container_width=True)
+    
+    with col1:
+        # Display radar chart
+        st.plotly_chart(create_radar_chart(skills_data), use_container_width=True)
+    
+    with col2:
+        # Display category bar chart
+        st.plotly_chart(create_category_bar_chart(overall_score, skills_avg, experience_score), use_container_width=True)
 
 class ResumeMatchingSystem:
     def __init__(self, model_name: str = "llama3.2"):
@@ -18,7 +155,7 @@ class ResumeMatchingSystem:
         self.embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
-        
+
         # Initialize vector store
         self.vector_store = Chroma(
             embedding_function=self.embeddings,
@@ -43,7 +180,7 @@ class ResumeMatchingSystem:
                 "top_k": 50,
                 "top_p": 0.9
             },
-            "qwen2.5-coder": {
+            "qwen2.5-coder:14b": {
                 "temperature": 0.7,
                 "num_ctx": 8192,
                 "num_predict": 2048,
@@ -66,12 +203,11 @@ class ResumeMatchingSystem:
     def scrape_job_description(self, url: str) -> str:
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             response = requests.get(url, headers=headers)
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Try different common job description selectors
             possible_selectors = [
                 'div[class*="job-description"]',
                 'div[class*="description"]',
@@ -87,7 +223,6 @@ class ResumeMatchingSystem:
                     break
             
             if not job_description:
-                # If no specific selectors work, try to get the main content
                 main_content = soup.find(['main', 'article'])
                 if main_content:
                     job_description = main_content.get_text(strip=True, separator='\n')
@@ -120,7 +255,7 @@ class ResumeMatchingSystem:
         prompts = {
             "llama3.2": """
             System: You are an expert AI Resume Analyzer. Provide a detailed analysis of the resume match.
-            Your response should be comprehensive and well-structured.
+            Your response should be well-structured and include specific percentages for different aspects.
             
             Human: Please analyze the following resume and job description:
             
@@ -135,16 +270,18 @@ class ResumeMatchingSystem:
             # Match Analysis Report
 
             ## Overall Match Score
-            - Provide a percentage score (0-100%)
-            - Explain why you gave this score with specific examples
+            - Overall match: XX% (provide specific percentage)
+            - Experience match: XX% (provide specific percentage)
+            - Skills match: XX% (provide specific percentage)
+            - Explain why you gave these scores with specific examples
 
             ## Key Matching Skills
-            - List and explain each skill that matches well
+            - List each matching skill with a percentage match
             - Provide specific examples from both the resume and job description
             - Highlight particularly strong matches
 
             ## Missing or Underdeveloped Skills
-            - Identify important skills from the job description that are missing or need strengthening
+            - Identify important skills from the job description that are missing
             - Explain why these skills are important for the role
             - Suggest ways to develop these skills
 
@@ -159,52 +296,15 @@ class ResumeMatchingSystem:
             - Provide tips for interview preparation
 
             Format your response using proper markdown with clear sections and bullet points.
+            BE SURE TO INCLUDE PERCENTAGE SCORES FOR OVERALL MATCH AND INDIVIDUAL SKILLS.
             """,
             
             "llama3.2-vision": """
-            You are an expert AI Resume Analyzer with enhanced visual understanding capabilities.
-            Perform a comprehensive analysis of the resume and job description match.
-            
-            Job Description:
-            {job_description}
-            
-            Resume:
-            {resume}
-            
-            Provide a detailed analysis following this EXACT structure:
-            
-            # Visual Resume Analysis Report
-
-            ## Overall Match Score
-            - Calculate and explain a match percentage (0-100%)
-            - Justify the score based on specific matches
-
-            ## Document Presentation Analysis
-            - Layout and formatting assessment
-            - Visual hierarchy evaluation
-            - Professional appearance review
-
-            ## Skills and Experience Match
-            - Core competencies alignment
-            - Experience relevance
-            - Project highlights
-
-            ## Areas for Improvement
-            - Visual presentation suggestions
-            - Content organization recommendations
-            - Format and style enhancements
-
-            ## Career Progression
-            - Career trajectory analysis
-            - Growth potential
-            - Role alignment recommendations
-
-            Format your response in a clear, structured way using markdown with proper headings and bullet points.
+            You are an expert AI Resume Analyzer. Follow the same format as llama3.2 prompt but with additional focus on visual aspects.
             """,
             
-            "qwen2.5-coder": """
-            You are an expert Technical Resume Analyzer specializing in software development roles.
-            Perform a technical analysis of the resume for this coding position.
+            "qwen2.5-coder:14b": """
+            You are an expert Technical Resume Analyzer. You already have the resume and job description - analyze them directly.
             
             Job Description:
             {job_description}
@@ -212,87 +312,65 @@ class ResumeMatchingSystem:
             Resume:
             {resume}
             
-            Provide a detailed analysis following this EXACT structure:
+            Provide a detailed technical analysis following this EXACT structure:
 
             # Technical Resume Analysis Report
 
             ## Technical Match Score
-            - Overall technical skills match percentage
-            - Detailed breakdown of match areas
+            - Provide an overall match percentage (0-100%)
+            - Break down the scoring by technical areas
+            - Explain the scoring rationale
 
             ## Programming Skills Analysis
-            - Languages and frameworks evaluation
-            - Technical stack alignment
-            - Development methodology experience
-
-            ## System Design & Architecture
-            - Architecture experience assessment
-            - System design capabilities
-            - Scalability and performance considerations
-
-            ## Code Quality & Best Practices
-            - Code quality indicators
-            - Testing and documentation experience
-            - Development process familiarity
+            - List all programming languages found with proficiency levels
+            - Framework and library expertise
+            - Development tools and environments
+            - Each skill should include a percentage match score
 
             ## Technical Project Experience
-            - Key project analysis
-            - Technical leadership indicators
-            - Problem-solving examples
+            - Analyze relevant technical projects
+            - Evaluate complexity and scale
+            - Assess problem-solving approaches
+            - Include percentage match for project experience
 
-            ## Growth Areas & Recommendations
-            - Missing technical skills
-            - Suggested learning paths
-            - Recommended certifications
+            ## System Design & Architecture
+            - Evaluate system design experience
+            - Assess scalability considerations
+            - Review architectural patterns used
+            - Include percentage match for design skills
 
-            Format your response in a clear, structured way using markdown with proper headings and bullet points.
+            ## Areas for Technical Growth
+            - Identify missing technical skills
+            - Suggest specific learning paths
+            - Recommend certifications
+            - Prioritize improvements needed
+
+            Format your response using proper markdown with clear sections and bullet points.
+            ENSURE TO INCLUDE PERCENTAGE SCORES FOR ALL EVALUATIONS.
             """
         }
         
         try:
-            # Get the appropriate prompt for the model
             prompt_template = prompts.get(model_name, prompts["llama3.2"])
-            
-            # Create the prompt
             prompt = ChatPromptTemplate.from_template(prompt_template)
-            
-            # Create and run the chain
             chain = prompt | self.llm | StrOutputParser()
             
             try:
-                # Get initial analysis
                 analysis = chain.invoke({
                     "job_description": job_description, 
                     "resume": resume
                 }, config={
-                    "timeout": 180,  # 3 minute timeout
+                    "timeout": 180,
                     "retry_on_failure": True
                 })
                 
-                # Validate response and get additional details if needed
-                if len(analysis.strip()) < 200:  # Increased minimum length
+                if len(analysis.strip()) < 200:
                     st.warning("Initial analysis was brief, getting more details...")
-                    
                     detailed_prompt = ChatPromptTemplate.from_template("""
-                    Based on the initial analysis, please provide more specific details about:
-                    
-                    Previous Analysis:
-                    {previous_analysis}
-                    
-                    Job Description:
-                    {job_description}
-                    
-                    Resume:
-                    {resume}
-                    
-                    Please provide additional details focusing on:
-                    1. More specific examples of matching skills
-                    2. Detailed explanation of missing skills
-                    3. Concrete, actionable resume improvements
-                    4. Specific certifications and courses to consider
-                    5. Practical steps for skill development
-                    
-                    Format the response in a clear, structured way using markdown.
+                    Based on the initial analysis, please provide more specific details and numerical scores...
+                    Previous Analysis: {previous_analysis}
+                    Job Description: {job_description}
+                    Resume: {resume}
                     """)
                     
                     chain = detailed_prompt | self.llm | StrOutputParser()
@@ -302,41 +380,18 @@ class ResumeMatchingSystem:
                         "resume": resume
                     })
                     
-                    # Combine analyses
                     analysis = f"{analysis}\n\n## Additional Details\n\n{additional_analysis}"
                 
                 return analysis
                 
             except Exception as e:
                 st.warning(f"Initial analysis attempt failed ({str(e)}), trying simplified approach...")
-                
-                # Fallback to simpler prompt
+                # Fallback to simpler prompt...
                 simplified_prompt = ChatPromptTemplate.from_template("""
-                Analyze this resume for the job position:
-
-                Job Description:
-                {job_description}
-
-                Resume:
-                {resume}
-
-                Provide a clear analysis covering:
-                1. Match Percentage (0-100%) with explanation
-                2. Key matching skills found
-                3. Important missing skills
-                4. Specific improvement recommendations
-
-                Keep the response informative but concise.
-                Format in markdown with clear sections.
+                Provide a simplified analysis with clear percentage scores for overall match and skills...
                 """)
-                
                 chain = simplified_prompt | self.llm | StrOutputParser()
-                analysis = chain.invoke({
-                    "job_description": job_description, 
-                    "resume": resume
-                })
-                
-                return analysis
+                return chain.invoke({"job_description": job_description, "resume": resume})
                 
         except Exception as e:
             st.error(f"Error in resume analysis: {str(e)}")
@@ -348,11 +403,10 @@ def main():
     st.title("🎯 AI Resume Matcher")
     st.write("Upload your resume and provide a job link to get personalized recommendations!")
 
-    # Model selection
     model_descriptions = {
         "llama3.2": "Balanced model good for general resume analysis",
         "llama3.2-vision": "Advanced model with better understanding of visual elements and layout",
-        "qwen2.5-coder": "Specialized for technical and programming positions"
+        "qwen2.5-coder:14b": "Specialized for technical and programming positions"
     }
     
     with st.expander("ℹ️ Model Information", expanded=True):
@@ -368,7 +422,7 @@ def main():
            - Enhanced analysis capabilities
            - Good for design-focused positions
         
-        3. **Qwen 2.5 Coder** (9.0 GB)
+        3. **qwen2.5-coder:14b** (9.0 GB)
            - Specialized for technical positions
            - Strong coding knowledge
            - Best for developer roles
@@ -380,13 +434,11 @@ def main():
         format_func=lambda x: f"{x} - {model_descriptions[x]}"
     )
 
-    # Initialize the matching system with selected model
     try:
         matcher = ResumeMatchingSystem(selected_model)
     except Exception:
         st.stop()
 
-    # Create two columns for input
     col1, col2 = st.columns(2)
 
     with col1:
@@ -413,7 +465,6 @@ def main():
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
-                # Get job description
                 job_description = None
                 if job_url:
                     status_text.text("Scraping job description...")
@@ -423,7 +474,6 @@ def main():
                     job_description = job_description_text
                 
                 if job_description:
-                    # Process each resume
                     for idx, uploaded_file in enumerate(uploaded_files):
                         status_text.text(f"Processing resume {idx + 1}/{len(uploaded_files)}...")
                         progress_bar.progress(40 + (idx * 20))
@@ -441,6 +491,10 @@ def main():
                             
                             if analysis:
                                 st.subheader(f"Analysis for {uploaded_file.name}")
+                                # Display visualizations first
+                                display_visualizations(analysis)
+                                # Then display the text analysis
+                                st.markdown("## Detailed Analysis")
                                 st.markdown(analysis)
                     
                     progress_bar.progress(100)
@@ -448,7 +502,6 @@ def main():
                     
                     progress_bar.empty()
                     status_text.empty()
-
 
 if __name__ == "__main__":
     main()
